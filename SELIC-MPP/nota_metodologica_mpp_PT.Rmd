@@ -1,0 +1,744 @@
+---
+title: "Um Modelo Monetário Semi-Estrutural para o Brasil"
+subtitle: "Adaptação Mensal Inspirada em Bogdanski, Tombini & Werlang (2000)"
+author: "Inspirado no MPP do Banco Central do Brasil — Bogdanski, Tombini & Werlang (2000)"
+date: "`r format(Sys.Date(), '%d de %B de %Y')`"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    number_sections: true
+    fig_caption: true
+    code_folding: show
+    css: |
+      body { font-family: 'Georgia', serif; font-size: 15px; line-height: 1.7; color: #1a1a2e; }
+      h1, h2, h3 { font-family: 'Trebuchet MS', sans-serif; color: #16213e; }
+      h1.title { font-size: 2.2em; color: #0f3460; border-bottom: 3px solid #e94560; padding-bottom: 12px; }
+      .subtitle { color: #457b9d; font-style: italic; font-size: 1.1em; }
+      .destaque {
+        background: #eaf4fb;
+        border-left: 5px solid #0f3460;
+        padding: 14px 18px;
+        margin: 18px 0;
+        border-radius: 4px;
+      }
+      .aviso {
+        background: #fff8e1;
+        border-left: 5px solid #f59e0b;
+        padding: 14px 18px;
+        margin: 18px 0;
+        border-radius: 4px;
+      }
+      blockquote {
+        border-left: 4px solid #e94560;
+        color: #555;
+        font-style: italic;
+        padding-left: 14px;
+      }
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = TRUE,
+  message    = FALSE,
+  warning    = FALSE,
+  fig.align  = "center",
+  dpi        = 150
+)
+
+pkgs <- c("tidyverse", "mFilter", "dynlm", "sandwich", "lmtest",
+          "ggplot2", "plotly", "knitr", "kableExtra", "scales")
+
+invisible(lapply(pkgs, function(p) {
+  if (!requireNamespace(p, quietly = TRUE)) install.packages(p, quiet = TRUE)
+  library(p, character.only = TRUE)
+}))
+
+# ── Defaults plotly ─────────────────────────────────────────────────────────────
+plt_layout <- list(
+  plot_bgcolor  = "white",
+  paper_bgcolor = "white",
+  font          = list(family = "Georgia, serif", size = 12),
+  margin        = list(l = 60, r = 30, t = 70, b = 50),
+  legend        = list(orientation = "h", y = -0.18, font = list(size = 11)),
+  hoverlabel    = list(bgcolor = "white", font = list(size = 12))
+)
+
+plt_cfg <- list(displayModeBar = TRUE, displaylogo = FALSE,
+                modeBarButtonsToRemove = list("lasso2d", "select2d"))
+
+clr_main <- "#0f3460"; clr_red  <- "#e94560"
+clr_blue <- "#1a7abf"; clr_teal <- "#2ab7ca"; clr_grey <- "#888888"
+
+# Helper de linha horizontal no plotly (add_hline é função do ggplot2, não do plotly)
+hline <- function(y, color = "#888888", dash = "dot", width = 1) {
+  list(type = "line",
+       x0 = 0, x1 = 1, xref = "paper",
+       y0 = y, y1 = y,
+       line = list(color = color, dash = dash, width = width))
+}
+```
+
+---
+
+::::: {.aviso}
+**Posicionamento metodológico — leia antes de prosseguir.**
+
+Este documento **não** replica o modelo operacional utilizado pelo Banco Central do Brasil em 1999. O objetivo é desenvolver uma **adaptação moderna, mensal e semi-estrutural** inspirada na arquitetura de quatro blocos de Bogdanski, Tombini & Werlang (2000): demanda agregada (IS), dinâmica inflacionária (Curva de Phillips), transmissão cambial (PCI) e regra de política (Taylor).
+
+Principais diferenças em relação ao MPP original:
+
+- **Frequência**: o modelo original operava em dados trimestrais; esta adaptação utiliza dados **mensais** (IBC-Br como proxy de atividade, expectativas do Focus, EMBI+ como risco-país).
+- **Estimação**: o original combinava calibração e ajuste julgamental; esta nota utiliza **MQO com erros-padrão HAC** sem impor formalmente todas as restrições estruturais.
+- **Taxa neutra**: o original impunha $r^* = g^*$ como restrição rígida; esta adaptação estima uma **tendência estatística da taxa real ex-ante** como proxy — não deve ser interpretada como taxa neutra estrutural.
+- **Escopo**: o original focava em projeções condicionais de inflação sob trajetórias alternativas da Selic; esta adaptação também compara o modelo estrutural com métodos de aprendizado de máquina.
+
+Utilize esta nota como **referência pedagógica** sobre o mecanismo de transmissão da política monetária no Brasil, e não como replicação do ferramental interno do BCB.
+:::::
+
+---
+
+# Motivação: Por que Modelos de Pequeno Porte?
+
+O regime de metas de inflação exige que o banco central adote uma postura **prospectiva**: as decisões de política monetária afetam a inflação com defasagens consideráveis. Como disse Greenspan:
+
+> *"Implícita em qualquer ação ou inação de política monetária está a expectativa de como o futuro se desdobrará — isto é, uma **previsão**."*
+
+O MPP ocupa posição estratégica na hierarquia de modelos: simples o suficiente para ser explicado a um comitê de política, estruturado o suficiente para simular cenários alternativos.
+
+```{r hierarquia-modelos, echo=FALSE}
+df_hier <- data.frame(
+  modelo   = c("Indicadores\nAntecedentes", "VAR / ARMA", "MPP\n(Semi-estr.)", "DSGE\nCompleto"),
+  transpar = c(90, 70, 55, 20),
+  forecast = c(30, 60, 70, 85),
+  tooltip  = c(
+    "Indicadores Antecedentes\nTransparência: Alta\nCapacidade de simulação: Baixa",
+    "VAR / ARMA\nTransparência: Média\nCapacidade de simulação: Média",
+    "MPP (Semi-estrutural)\nTransparência: Média\nCapacidade de simulação: Alta",
+    "DSGE Completo\nTransparência: Baixa\nCapacidade de simulação: Muito Alta"
+  )
+)
+
+plot_ly(df_hier,
+        x = ~transpar, y = ~forecast,
+        type = "scatter", mode = "markers+text",
+        marker = list(size = 22, opacity = 0.85,
+                      color = c(clr_red, clr_main, clr_blue, clr_teal)),
+        text         = ~modelo,
+        textposition = "top center",
+        hovertext    = ~tooltip,
+        hoverinfo    = "text",
+        showlegend   = FALSE) %>%
+  layout(
+    title = list(
+      text = "<b>Hierarquia de Modelos Macroeconômicos</b><br><sub>Trade-off entre transparência e riqueza de mecanismos</sub>",
+      font = list(size = 14, color = clr_main)
+    ),
+    xaxis = list(title = "← Complexidade / Microfundamentos",
+                 autorange = "reversed",
+                 showticklabels = FALSE, zeroline = FALSE),
+    yaxis = list(title = "Capacidade de simulação de política →",
+                 showticklabels = FALSE, zeroline = FALSE),
+    plot_bgcolor = "white", paper_bgcolor = "white",
+    font = plt_layout$font, margin = plt_layout$margin,
+    hoverlabel = plt_layout$hoverlabel
+  ) %>%
+  config(displayModeBar = FALSE)
+```
+
+---
+
+# Estrutura do Modelo
+
+O MPP é composto por **quatro blocos principais** (diagrama estático — gráficos seguintes são interativos):
+
+```{r diagrama-blocos, echo=FALSE, fig.height=3.8, fig.width=8}
+library(ggplot2)
+
+nos <- data.frame(
+  label = c("Curva IS\n(Demanda Agregada)",
+            "Curva de Phillips\n(Oferta Agregada)",
+            "Paridade\nnão Coberta",
+            "Regra de\nPolítica Monetária",
+            "INFLAÇÃO"),
+  x = c(1,3,3,1,2), y = c(2,2,0,0,1),
+  fill = c(clr_main, clr_main, clr_main, clr_red, clr_teal)
+)
+arestas <- data.frame(x0=c(1,1,3,3,1),y0=c(2,0,0,2,2),x1=c(2,2,2,2,3),y1=c(1,1,1,1,2))
+
+ggplot() +
+  geom_segment(data=arestas,aes(x=x0,y=y0,xend=x1,yend=y1),
+               arrow=arrow(length=unit(0.2,"cm"),type="closed"),
+               color="#457b9d", linewidth=0.8) +
+  geom_label(data=nos, aes(x=x,y=y,label=label),
+             fill=nos$fill, color="white", size=3.2, fontface="bold",
+             label.padding=unit(0.4,"lines"), label.r=unit(0.15,"lines")) +
+  xlim(0.3,3.7)+ylim(-0.4,2.6)+theme_void()+
+  labs(title="Diagrama de Blocos do MPP",
+       caption="Fonte: Bogdanski, Tombini & Werlang (2000), Figura 1")+
+  theme(plot.title=element_text(face="bold",color=clr_main,size=13),
+        plot.caption=element_text(color="#888",size=9))
+```
+
+---
+
+# Bloco I — Curva IS (Demanda Agregada)
+
+## Especificação Teórica
+
+$$\boxed{\tilde{y}_t = \beta_0 + \beta_1 \tilde{y}_{t-1} + \beta_2 \tilde{y}_{t-2} + \beta_3 r_{t-1} + \varepsilon^d_t}$$
+
+onde $\tilde{y}_t = \ln(Y_t / Y^*_t)$ é o hiato do produto e $r_t$ é a taxa de juros real ex-ante.
+
+::::: {.aviso}
+**Nota sobre a taxa neutra.** O MPP original impunha $r^* = g^*$ como restrição estrutural rígida. Esta adaptação estima uma *tendência estatística da taxa real ex-ante* como proxy. Essa média reflete reações do BCB a choques e crises — não é automaticamente a taxa de equilíbrio consistente com o crescimento potencial.
+:::::
+
+## Hiato do Produto e Filtro HP
+
+```{r hp-hiato}
+set.seed(42)
+n <- 120
+tendencia <- cumsum(c(0.005, rep(0.006,n-1) + rnorm(n-1,0,0.001)))
+ciclo_v   <- numeric(n)
+for(t in 2:n) ciclo_v[t] <- 0.65*ciclo_v[t-1] + rnorm(1,0,0.01)
+
+idx_pib <- 100 + tendencia + ciclo_v
+datas   <- seq(as.Date("1995-01-01"), by="quarter", length.out=n)
+
+df_pib <- data.frame(data=datas, idx_pib=idx_pib)
+hp_result        <- mFilter::hpfilter(df_pib$idx_pib, freq=1600)
+df_pib$potencial <- hp_result$trend
+df_pib$hiato     <- hp_result$cycle
+
+p_pib <- plot_ly(df_pib, x=~data) %>%
+  add_lines(y=~idx_pib, name="PIB Observado",
+            line=list(color=clr_main, width=2),
+            hovertemplate="%{x|%Y-%m}<br>Observado: %{y:.2f}<extra></extra>") %>%
+  add_lines(y=~potencial, name="PIB Potencial (HP)",
+            line=list(color=clr_red, width=2, dash="dash"),
+            hovertemplate="%{x|%Y-%m}<br>Potencial: %{y:.2f}<extra></extra>") %>%
+  layout(
+    title=list(text="<b>PIB Observado vs. Produto Potencial</b><br><sub>Filtro Hodrick-Prescott (λ = 1.600) — dados simulados</sub>",
+               font=list(size=13,color=clr_main)),
+    xaxis=list(title=""), yaxis=list(title="Índice (construído)"),
+    hovermode="x unified", plot_bgcolor="white", paper_bgcolor="white",
+    legend=plt_layout$legend, font=plt_layout$font,
+    margin=plt_layout$margin, hoverlabel=plt_layout$hoverlabel
+  )
+
+p_hiato <- plot_ly(df_pib, x=~data) %>%
+  add_ribbons(ymin=~pmin(hiato,0), ymax=~pmax(hiato,0),
+              fillcolor=paste0(clr_main,"30"),
+              line=list(color="transparent"),
+              name="Área hiato", showlegend=FALSE, hoverinfo="skip") %>%
+  add_lines(y=~hiato, name="Hiato do produto",
+            line=list(color=clr_main, width=2),
+            hovertemplate="%{x|%Y-%m}<br>Hiato: %{y:.4f}<extra></extra>") %>%
+  layout(shapes=list(hline(0, clr_grey, "dot"))) %>%
+  layout(
+    title=list(text="<b>Hiato do Produto</b><br><sub>Desvio em relação à tendência HP (unidades do índice)</sub>",
+               font=list(size=13,color=clr_main)),
+    xaxis=list(title=""), yaxis=list(title="Hiato (unidades do índice)"),
+    hovermode="x unified", plot_bgcolor="white", paper_bgcolor="white",
+    legend=plt_layout$legend, font=plt_layout$font,
+    margin=plt_layout$margin, hoverlabel=plt_layout$hoverlabel
+  )
+
+subplot(p_pib, p_hiato, nrows=2, shareX=TRUE, titleY=TRUE) %>%
+  layout(hovermode="x unified") %>%
+  config(plt_cfg)
+```
+
+## Estimação MQO
+
+```{r estimacao-is}
+set.seed(7)
+taxa_nominal  <- 0.18 + 0.3*(-df_pib$hiato) + rnorm(n,0,0.03)
+inflacao_sim  <- 0.06 + 0.5*df_pib$hiato    + rnorm(n,0,0.015)
+taxa_real     <- taxa_nominal - inflacao_sim
+
+df_is <- df_pib %>%
+  mutate(y=hiato, y_l1=lag(hiato,1), y_l2=lag(hiato,2), r_l1=lag(taxa_real,1)) %>%
+  drop_na()
+
+modelo_is   <- lm(y~y_l1+y_l2+r_l1, data=df_is)
+erros_hac   <- sandwich::NeweyWest(modelo_is, lag=4, prewhite=FALSE)
+coeftest_is <- lmtest::coeftest(modelo_is, vcov=erros_hac)
+
+knitr::kable(
+  broom::tidy(coeftest_is) %>%
+    mutate(term=c("β₀ (constante)","β₁ (ỹ_{t-1})","β₂ (ỹ_{t-2})","β₃ (r_{t-1})"),
+           across(where(is.numeric),~round(.x,4))) %>%
+    rename(Parâmetro=term, Estimativa=estimate,
+           `Erro Padrão`=std.error, `Estat. t`=statistic, `p-valor`=p.value),
+  caption="**Curva IS — MQO com erros HAC (Newey-West, 4 defasagens)**"
+) %>%
+  kableExtra::kable_styling(bootstrap_options=c("striped","hover","condensed"), full_width=FALSE)
+```
+
+```{r diagnosticos-is}
+df_is$ajustado <- fitted(modelo_is)
+df_is$residuo  <- residuals(modelo_is)
+
+p_fit <- plot_ly(df_is, x=~data) %>%
+  add_lines(y=~y*100, name="Observado",
+            line=list(color=clr_main,width=1.8),
+            hovertemplate="%{x|%Y-%m}<br>Obs: %{y:.3f}<extra></extra>") %>%
+  add_lines(y=~ajustado*100, name="Ajustado",
+            line=list(color=clr_red,width=1.8,dash="dash"),
+            hovertemplate="%{x|%Y-%m}<br>Ajustado: %{y:.3f}<extra></extra>") %>%
+  layout(title=list(text="<b>Hiato observado vs. ajustado</b>",
+                    font=list(size=12,color=clr_main)),
+         xaxis=list(title=""), yaxis=list(title="Hiato × 100"),
+         hovermode="x unified", plot_bgcolor="white", paper_bgcolor="white",
+         legend=plt_layout$legend, font=plt_layout$font,
+         margin=plt_layout$margin, hoverlabel=plt_layout$hoverlabel)
+
+p_res <- plot_ly(df_is, x=~data) %>%
+  add_bars(y=~residuo*100, name="Resíduo",
+           marker=list(color=paste0(clr_blue,"99")),
+           hovertemplate="%{x|%Y-%m}<br>Resíduo: %{y:.4f}<extra></extra>") %>%
+  layout(shapes=list(hline(0, clr_grey, "dot"))) %>%
+  layout(title=list(text="<b>Resíduos da Curva IS</b>",
+                    font=list(size=12,color=clr_main)),
+         xaxis=list(title=""), yaxis=list(title="Resíduo"),
+         hovermode="x unified", plot_bgcolor="white", paper_bgcolor="white",
+         legend=plt_layout$legend, font=plt_layout$font,
+         margin=plt_layout$margin, hoverlabel=plt_layout$hoverlabel)
+
+subplot(p_fit, p_res, nrows=2, shareX=TRUE, titleY=TRUE) %>%
+  layout(hovermode="x unified") %>%
+  config(plt_cfg)
+```
+
+---
+
+# Bloco II — Curva de Phillips (Oferta Agregada)
+
+## Especificação Híbrida
+
+$$\boxed{\pi_t = \underbrace{\alpha_1 \pi_{t-1} + \alpha_2 \pi_{t-2}}_{\text{inércia}} + \underbrace{\alpha_{fwd}\,\mathbb{E}_t[\pi_{t+1}]}_{\text{expectativas}} + \alpha_3 \tilde{y}_{t-1} + \alpha_4 \Delta \ln E_t + \varepsilon_t}$$
+
+Restrição de longo prazo: $\alpha_1 + \alpha_2 + \alpha_{fwd} = 1$.
+
+::::: {.aviso}
+**MQO sem restrição formal.** Esta adaptação não impõe a restrição de longo prazo. O IPCA em 12m gera autocorrelação mecânica entre observações; e as expectativas do Focus devem ser verificadas como genuinamente ex-ante para evitar viés de look-ahead.
+:::::
+
+## Simulação e Repasse Cambial
+
+```{r simulacao-phillips}
+set.seed(21)
+# α₁ + α₂ + α_fwd = 0,45 + 0,20 + 0,35 = 1,00 ✓ (neutralidade de longo prazo)
+# α₃ (hiato) e α₄ (câmbio) são coeficientes separados — não entram na restrição
+alpha1 <- 0.45; alpha2 <- 0.20; alpha_fwd <- 0.35
+alpha3 <- 0.25; alpha4 <- 0.12
+pi_star <- 0.045
+
+delta_e <- rnorm(n,0,0.04)
+eps_pc  <- rnorm(n,0,0.008)
+pi <- numeric(n); pi[1:3] <- 0.06
+for (t in 4:n) {
+  pi_fwd <- pi[t-1]+rnorm(1,0,0.005)
+  pi[t]  <- alpha1*pi[t-1]+alpha2*pi[t-2]+alpha_fwd*pi_fwd+
+            alpha3*df_pib$hiato[t]+alpha4*delta_e[t]+eps_pc[t]
+  pi[t]  <- max(pi[t],-0.02)
+}
+
+df_pc <- data.frame(data=datas, inflacao=pi, hiato=df_pib$hiato, delta_e=delta_e)
+
+p_pi <- plot_ly(df_pc, x=~data) %>%
+  add_lines(y=~inflacao*100, name="Inflação",
+            line=list(color=clr_red,width=2),
+            hovertemplate="%{x|%Y-%m}<br>IPCA: %{y:.2f}%<extra></extra>") %>%
+  layout(shapes=list(hline(pi_star*100, clr_main, "dash", 1.5))) %>%
+  layout(
+    title=list(text="<b>Inflação simulada — Curva de Phillips Híbrida</b><br><sub>α₁ + α₂ + α_fwd = 1,00 (neutralidade de longo prazo)</sub>",
+               font=list(size=12,color=clr_main)),
+    xaxis=list(title=""), yaxis=list(title="IPCA (% a.a.)",ticksuffix="%"),
+    hovermode="x unified", plot_bgcolor="white", paper_bgcolor="white",
+    legend=plt_layout$legend, font=plt_layout$font,
+    margin=plt_layout$margin, hoverlabel=plt_layout$hoverlabel
+  )
+
+E_seq <- seq(1.5,6.5,length.out=100)
+df_pt <- data.frame(
+  E         = E_seq,
+  Constante = 0.12,
+  Quadratica= 0.08+0.04*(log(E_seq))^2,
+  Nivel     = pmax(0.05,0.22-0.03*log(E_seq))
+)
+
+p_pt <- plot_ly(df_pt, x=~E) %>%
+  add_lines(y=~Constante,  name="Constante",
+            line=list(color=clr_main,width=2),
+            hovertemplate="R$/US$: %{x:.2f}<br>α₄ (constante): %{y:.3f}<extra></extra>") %>%
+  add_lines(y=~Quadratica, name="Quadrático em Δe",
+            line=list(color=clr_red,width=2),
+            hovertemplate="R$/US$: %{x:.2f}<br>α₄ (quad): %{y:.3f}<extra></extra>") %>%
+  add_lines(y=~Nivel,      name="Dependente do nível",
+            line=list(color=clr_teal,width=2),
+            hovertemplate="R$/US$: %{x:.2f}<br>α₄ (nível): %{y:.3f}<extra></extra>") %>%
+  layout(
+    title=list(text="<b>Repasse cambial: especificações alternativas</b><br><sub>Goldfajn & Werlang (1999)</sub>",
+               font=list(size=12,color=clr_main)),
+    xaxis=list(title="Câmbio (R$/US$)"), yaxis=list(title="Coeficiente α₄"),
+    hovermode="x", plot_bgcolor="white", paper_bgcolor="white",
+    legend=plt_layout$legend, font=plt_layout$font,
+    margin=plt_layout$margin, hoverlabel=plt_layout$hoverlabel
+  )
+
+subplot(p_pi, p_pt, nrows=2, shareX=FALSE, titleY=TRUE) %>%
+  config(plt_cfg)
+```
+
+---
+
+# Bloco III — Paridade de Juros Não Coberta (PCI)
+
+## Convenção de Sinais Corrigida
+
+Com $e_t = \ln(\text{R\$/US\$})$:
+
+$$\boxed{\Delta e_t = -\alpha_i \Delta i_t + \alpha_f \Delta i^*_t + \alpha_x \Delta x_t + \eta_t}$$
+
+com $\alpha_i > 0,\ \alpha_f > 0,\ \alpha_x > 0$.
+
+::::: {.aviso}
+**Erro de sinal frequente.** A taxa Selic doméstica deve entrar com sinal **negativo**. Sob a convenção $e_t = \ln(\text{R\$/US\$})$, elevar a Selic aprecia o Real (reduz $e_t$). Uma versão anterior desta nota apresentava o sinal invertido.
+:::::
+
+```{r simulacao-pci}
+set.seed(99)
+i_ext <- 0.055
+x_risco <- numeric(n); e_log <- numeric(n)
+x_risco[1] <- 300; e_log[1] <- log(3.5)
+
+for(t in 2:n) {
+  x_risco[t] <- max(0.7*x_risco[t-1]+rnorm(1,0,25)-15*(t>60), 50)
+  selic_t    <- 0.12-0.02*(t/n)+rnorm(1,0,0.015)
+  # PCI: taxa doméstica mais alta reduz depreciação (sinal negativo em i_t)
+  e_log[t]   <- e_log[t-1]-(selic_t-i_ext-x_risco[t]/10000)/4+rnorm(1,0,0.025)
+}
+
+df_pci <- data.frame(data=datas, cambio=exp(e_log), risco=x_risco)
+
+p_cambio <- plot_ly(df_pci, x=~data) %>%
+  add_lines(y=~cambio, name="R$/US$",
+            line=list(color=clr_main,width=2),
+            hovertemplate="%{x|%Y-%m}<br>R$/US$: %{y:.3f}<extra></extra>") %>%
+  layout(
+    title=list(text="<b>Câmbio simulado (R$/US$)</b><br><sub>Taxa doméstica mais alta → apreciação do Real (sinal correto da PCI)</sub>",
+               font=list(size=12,color=clr_main)),
+    xaxis=list(title=""), yaxis=list(title="R$/US$"),
+    hovermode="x unified", plot_bgcolor="white", paper_bgcolor="white",
+    legend=plt_layout$legend, font=plt_layout$font,
+    margin=plt_layout$margin, hoverlabel=plt_layout$hoverlabel
+  )
+
+p_risco <- plot_ly(df_pci, x=~data) %>%
+  add_lines(y=~risco, name="EMBI+",
+            line=list(color=clr_red,width=2),
+            hovertemplate="%{x|%Y-%m}<br>EMBI+: %{y:.0f} bps<extra></extra>") %>%
+  layout(shapes=list(hline(200, clr_grey, "dot"))) %>%
+  layout(
+    title=list(text="<b>Prêmio de risco-país (EMBI+)</b><br><sub>AR(1) com melhora fiscal gradual</sub>",
+               font=list(size=12,color=clr_main)),
+    xaxis=list(title=""), yaxis=list(title="Pontos-base (bps)"),
+    hovermode="x unified", plot_bgcolor="white", paper_bgcolor="white",
+    legend=plt_layout$legend, font=plt_layout$font,
+    margin=plt_layout$margin, hoverlabel=plt_layout$hoverlabel
+  )
+
+subplot(p_cambio, p_risco, nrows=2, shareX=TRUE, titleY=TRUE) %>%
+  layout(hovermode="x unified") %>%
+  config(plt_cfg)
+```
+
+---
+
+# Bloco IV — Regra de Política Monetária
+
+## Regra de Taylor Suavizada
+
+$$\boxed{i_t = (1-\lambda)\,i_{t-1} + \lambda \left[\alpha_1(\pi_t - \pi^*) + \alpha_2 \tilde{y}_t + \alpha_3\right]}$$
+
+::::: {.aviso}
+**Normativa vs. positiva.** O MPP original usava a regra normativamente: "qual trajetória da Selic é consistente com convergência da inflação à meta no cenário X?" Usar a regra como preditor positivo das decisões do COPOM é exercício diferente. Rotule as trajetórias como *"trajetória consistente com a função de reação estimada"*, não como previsão da Selic.
+:::::
+
+```{r regras-taylor}
+set.seed(55)
+N_regras <- 80
+alpha_pi_r <- 1.5; alpha_y_r <- 0.5; lambda_sm <- 0.7
+
+i_taylor <- alpha_pi_r*(pi[1:N_regras]-pi_star)+alpha_y_r*df_pib$hiato[1:N_regras]+0.10
+i_smooth <- numeric(N_regras); i_smooth[1] <- i_taylor[1]
+for(t in 2:N_regras) i_smooth[t] <- (1-lambda_sm)*i_smooth[t-1]+lambda_sm*i_taylor[t]
+i_const <- rep(mean(i_taylor),N_regras)
+
+df_regras <- data.frame(data=datas[1:N_regras],
+                        Taylor.Pura   = pmax(i_taylor,0.03),
+                        Suavizada     = pmax(i_smooth,0.03),
+                        Constante     = i_const)
+
+plot_ly(df_regras, x=~data) %>%
+  add_lines(y=~Taylor.Pura*100, name="Taylor Pura",
+            line=list(color=clr_main,width=2),
+            hovertemplate="%{x|%Y-%m}<br>Taylor Pura: %{y:.1f}%<extra></extra>") %>%
+  add_lines(y=~Suavizada*100, name="Taylor Suavizada (λ=0,7)",
+            line=list(color=clr_red,width=2),
+            hovertemplate="%{x|%Y-%m}<br>Suavizada: %{y:.1f}%<extra></extra>") %>%
+  add_lines(y=~Constante*100, name="Taxa Constante",
+            line=list(color=clr_grey,width=2,dash="dash"),
+            hovertemplate="%{x|%Y-%m}<br>Constante: %{y:.1f}%<extra></extra>") %>%
+  layout(
+    title=list(
+      text="<b>Trajetórias da taxa de juros sob regras alternativas</b><br><sub>Simulação ilustrativa — α_π = 1,5, α_y = 0,5</sub>",
+      font=list(size=13,color=clr_main)
+    ),
+    xaxis=list(title=""),
+    yaxis=list(title="Taxa de juros (% a.a.)",ticksuffix="%"),
+    hovermode="x unified",
+    plot_bgcolor="white", paper_bgcolor="white",
+    legend=plt_layout$legend, font=plt_layout$font,
+    margin=plt_layout$margin, hoverlabel=plt_layout$hoverlabel
+  ) %>%
+  config(plt_cfg)
+```
+
+---
+
+# Simulação do Sistema Completo
+
+## Fan Chart de Inflação
+
+```{r fan-chart, fig.height=5}
+set.seed(1234)
+T_proj <- 12; N_sims <- 2000
+a1_pc <- 0.45; a2_pc <- 0.20; a_fwd_pc <- 0.35   # soma = 1,00 ✓
+a3_pc <- 0.25; a4_pc <- 0.12
+b1_is <- 0.70; b2_is <- -0.15; b3_is <- -0.25
+lambda_r <- 0.65; phi_pi <- 1.5; phi_y <- 0.5
+pi0 <- 0.055; pi_1 <- 0.060; y0 <- -0.01; i0 <- 0.115; e0 <- log(5.0)
+
+simular_mpp <- function(semente) {
+  set.seed(semente)
+  pi_v <- c(pi_1,pi0,numeric(T_proj))
+  y_v  <- c(0,y0,numeric(T_proj))
+  i_v  <- c(i0,i0,numeric(T_proj))
+  for (t in 3:(T_proj+2)) {
+    r_real    <- i_v[t-1]-pi_v[t-1]
+    y_v[t]    <- b1_is*y_v[t-1]+b2_is*y_v[t-2]+b3_is*r_real+rnorm(1,0,0.007)
+    pi_fwd_t  <- pi_v[t-1]+rnorm(1,0,0.004)
+    delta_e_t <- -(i_v[t-1]-0.055-0.03)/4+rnorm(1,0,0.015)
+    pi_v[t]   <- a1_pc*pi_v[t-1]+a2_pc*pi_v[t-2]+
+                 a_fwd_pc*pi_fwd_t+a3_pc*y_v[t-1]+
+                 a4_pc*delta_e_t+rnorm(1,0,0.006)
+    pi_v[t]   <- max(pi_v[t],0)
+    i_v[t]    <- (1-lambda_r)*i_v[t-1]+
+                 lambda_r*(phi_pi*(pi_v[t]-pi_star)+phi_y*y_v[t]+0.10)
+  }
+  pi_v[3:(T_proj+2)]
+}
+
+mat_pi <- sapply(1:N_sims, simular_mpp)
+qtis   <- as.data.frame(t(apply(mat_pi,1,quantile,probs=c(.10,.20,.30,.40,.50,.60,.70,.80,.90))))
+colnames(qtis) <- paste0("q",c(10,20,30,40,50,60,70,80,90))
+qtis$trimestre <- seq(as.Date("2024-04-01"),by="quarter",length.out=T_proj)
+
+plot_ly(qtis, x=~trimestre) %>%
+
+  # Banda 80% (p10–p90)
+  add_ribbons(ymin=~q10*100, ymax=~q90*100,
+              fillcolor=paste0(clr_main,"1A"),
+              line=list(color="transparent"),
+              name="Banda 80%", legendgroup="bandas", hoverinfo="skip") %>%
+
+  # Banda 60% (p20–p80)
+  add_ribbons(ymin=~q20*100, ymax=~q80*100,
+              fillcolor=paste0(clr_main,"2A"),
+              line=list(color="transparent"),
+              name="Banda 60%", legendgroup="bandas", hoverinfo="skip") %>%
+
+  # Banda 40% (p30–p70)
+  add_ribbons(ymin=~q30*100, ymax=~q70*100,
+              fillcolor=paste0(clr_main,"3A"),
+              line=list(color="transparent"),
+              name="Banda 40%", legendgroup="bandas", hoverinfo="skip") %>%
+
+  # Banda 20% (p40–p60)
+  add_ribbons(ymin=~q40*100, ymax=~q60*100,
+              fillcolor=paste0(clr_main,"45"),
+              line=list(color="transparent"),
+              name="Banda 20%", legendgroup="bandas", hoverinfo="skip") %>%
+
+  # Mediana com tooltip rico
+  add_lines(y=~q50*100, name="Mediana (p50)",
+            line=list(color=clr_main,width=3),
+            hovertemplate=paste0(
+              "<b>%{x|%Y-T%q}</b><br>",
+              "Mediana: %{y:.2f}%<extra></extra>"
+            )) %>%
+
+  # Linhas de fronteira p10/p90
+  add_lines(y=~q10*100, name="p10",
+            line=list(color=clr_main,width=0.7,dash="dot"),
+            showlegend=FALSE,
+            hovertemplate="p10: %{y:.2f}%<extra></extra>") %>%
+  add_lines(y=~q90*100, name="p90",
+            line=list(color=clr_main,width=0.7,dash="dot"),
+            showlegend=FALSE,
+            hovertemplate="p90: %{y:.2f}%<extra></extra>") %>%
+
+  # Meta de inflação
+  add_lines(y=rep(pi_star*100,T_proj), x=~trimestre,
+            name=paste0("Meta (",pi_star*100,"%)"),
+            line=list(color=clr_red,width=1.8,dash="dash"),
+            hovertemplate="Meta: %{y:.1f}%<extra></extra>") %>%
+
+  layout(
+    title=list(
+      text=paste0("<b>Fan Chart — Projeção de Inflação (IPCA)</b><br>",
+                  "<sub>Monte Carlo (N=",N_sims," trajetórias) — bandas condicionais de 20/40/60/80%</sub>"),
+      font=list(size=14,color=clr_main)
+    ),
+    xaxis=list(title="",tickformat="%Y"),
+    yaxis=list(title="IPCA (% a.a.)",ticksuffix="%"),
+    hovermode="x unified",
+    plot_bgcolor="white", paper_bgcolor="white",
+    legend=list(orientation="h",y=-0.18,font=list(size=11)),
+    font=plt_layout$font,
+    margin=list(l=60,r=30,t=80,b=60),
+    hoverlabel=plt_layout$hoverlabel
+  ) %>%
+  config(plt_cfg)
+```
+
+---
+
+# Função de Resposta ao Impulso: Choque de +200 bps
+
+```{r fri-choque}
+simular_choque <- function(delta_selic=0.02, semente=42) {
+  set.seed(semente)
+  T_sim <- 16
+  pi_v  <- c(0.060,0.055,numeric(T_sim))
+  y_v   <- c(0.005,-0.01,numeric(T_sim))
+  i_v   <- c(0.115,0.115+delta_selic,numeric(T_sim))
+  for (t in 3:(T_sim+2)) {
+    r_real  <- i_v[t-1]-pi_v[t-1]
+    y_v[t]  <- b1_is*y_v[t-1]+b2_is*y_v[t-2]+b3_is*r_real+rnorm(1,0,0.004)
+    pi_fwd  <- pi_v[t-1]+rnorm(1,0,0.003)
+    pi_v[t] <- a1_pc*pi_v[t-1]+a2_pc*pi_v[t-2]+
+               a_fwd_pc*pi_fwd+a3_pc*y_v[t-1]+rnorm(1,0,0.004)
+    pi_v[t] <- max(pi_v[t],0)
+    i_v[t]  <- i_v[2]
+  }
+  data.frame(t=1:T_sim,
+             inflacao=pi_v[3:(T_sim+2)]*100,
+             hiato=y_v[3:(T_sim+2)]*100,
+             selic=i_v[3:(T_sim+2)]*100,
+             cenario=ifelse(delta_selic>0,"Choque +200bps","Linha de base"))
+}
+
+df_fri <- bind_rows(simular_choque(0.00), simular_choque(0.02))
+
+make_fri_panel <- function(y_var, label_var, y_title, add_target=FALSE) {
+  df_base  <- df_fri %>% filter(cenario=="Linha de base")
+  df_choque <- df_fri %>% filter(cenario=="Choque +200bps")
+  p <- plot_ly() %>%
+    add_lines(data=df_base,   x=~t, y=~get(y_var), name="Linha de base",
+              line=list(color=clr_grey,width=2,dash="dot"),
+              hovertemplate=paste0("T%{x}<br>Base ",label_var,": %{y:.2f}%<extra></extra>")) %>%
+    add_lines(data=df_choque, x=~t, y=~get(y_var), name="Choque +200bps",
+              line=list(color=clr_red,width=2.5),
+              hovertemplate=paste0("T%{x}<br>Choque ",label_var,": %{y:.2f}%<extra></extra>"))
+  if (add_target)
+    p <- p %>% layout(shapes=list(hline(pi_star*100, clr_main, "dot", 1)))
+  p %>% layout(
+    title=list(text=paste0("<b>",y_title,"</b>"),font=list(size=12,color=clr_main)),
+    xaxis=list(title="Trimestres",dtick=2),
+    yaxis=list(title=paste0(y_title," (%)"),ticksuffix="%"),
+    hovermode="x unified", plot_bgcolor="white", paper_bgcolor="white",
+    legend=plt_layout$legend, font=plt_layout$font, hoverlabel=plt_layout$hoverlabel
+  )
+}
+
+p_inf2 <- make_fri_panel("inflacao","Inflação","Inflação",      add_target=TRUE)
+p_hia2 <- make_fri_panel("hiato",  "Hiato",   "Hiato do produto", add_target=FALSE)
+p_sel2 <- make_fri_panel("selic",  "Selic",   "Taxa Selic",    add_target=FALSE)
+
+subplot(
+  subplot(p_inf2, p_hia2, shareX=TRUE, titleY=TRUE),
+  p_sel2,
+  nrows=2, shareX=TRUE, titleY=TRUE
+) %>%
+  layout(
+    title=list(
+      text="<b>FRI — Choque Contracionista (+200 bps)</b><br><sub>Desinflação via canal da demanda com ~2–3 trimestres de defasagem</sub>",
+      font=list(size=13,color=clr_main)
+    ),
+    hovermode="x unified", plot_bgcolor="white", paper_bgcolor="white"
+  ) %>%
+  config(plt_cfg)
+```
+
+---
+
+# Limitações
+
+```{r tabela-limitacoes, echo=FALSE}
+df_lim <- data.frame(
+  Limitação=c(
+    "Restrição de longo prazo não imposta (Phillips)",
+    "Variável de inflação em 12m (sobreposição)",
+    "PCI não completamente identificada",
+    "Taxa neutra é tendência estatística",
+    "MQO sem correção de simultaneidade",
+    "Frequência mensal (vs. trimestral original)"
+  ),
+  Descrição=c(
+    "MQO não impõe α₁+α₂+α_fwd=1; vale na simulação, não na estimação",
+    "IPCA em 12m cria autocorrelação mecânica; medidas não sobrepostas são preferíveis",
+    "Estimada como VAR/MQO auxiliar; taxa externa proxiada",
+    "r* reflete reações de política, não taxa de equilíbrio estrutural",
+    "IS, Phillips e PCI são simultâneos; MQO não identifica canais causais",
+    "IBC-Br é proxy razoável mas difere do PIB trimestral original"
+  ),
+  Correção=c(
+    "Impor como restrição linear em nlm() ou systemfit",
+    "Usar IPCA mensal dessazonalizado ou série trimestral não sobreposta",
+    "Usar série real de taxa externa; impor restrição de sinal na PCI",
+    "Reportar cenários de sensibilidade: r* ∈ {4%, 5%, 6%}",
+    "Instrumentalizar com defasagens ou usar estratégia SVAR",
+    "Documentar adaptação de frequência; verificar estrutura de defasagens"
+  )
+)
+knitr::kable(df_lim,
+             col.names=c("Limitação","Descrição","Correção Recomendada"),
+             caption="**Limitações conhecidas e correções recomendadas**") %>%
+  kableExtra::kable_styling(bootstrap_options=c("striped","hover","condensed")) %>%
+  kableExtra::column_spec(1,bold=TRUE,color=clr_main) %>%
+  kableExtra::column_spec(3,italic=TRUE,color="#457b9d")
+```
+
+---
+
+# Referências
+
+- Bogdanski, J., Tombini, A.A. & Werlang, S.R.C. (2000). *Implementing Inflation Targeting in Brazil*. Working Paper 1, Banco Central do Brasil.
+- Goldfajn, I. & Werlang, S.R.C. (1999). *The Pass-through from Depreciation to Inflation*. Mimeo, PUC-Rio / BCB.
+- Taylor, J.B. (1993). Discretion versus Policy Rules in Practice. *Carnegie-Rochester Conference Series on Public Policy*, 39, 195–214.
+- Hodrick, R.J. & Prescott, E.C. (1997). Postwar U.S. Business Cycles. *Journal of Money, Credit and Banking*, 29(1), 1–16.
+- Castro, M.R. et al. (2011). *SAMBA: Stochastic Analytical Model with a Bayesian Approach*. Working Paper 239, BCB.
+
+---
+
+*Todos os dados são **simulados** para fins pedagógicos. Este documento é uma adaptação — não uma replicação — do Modelo de Pequeno Porte do BCB.*

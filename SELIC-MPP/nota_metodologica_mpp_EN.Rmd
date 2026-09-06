@@ -1,0 +1,782 @@
+---
+title: "A Modern Semi-Structural Monetary Policy Model for Brazil"
+subtitle: "A Monthly MPP Adaptation Inspired by Bogdanski, Tombini & Werlang (2000)"
+author: "Inspired by the BCB Small-Scale Model (MPP) — Bogdanski, Tombini & Werlang (2000)"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    number_sections: true
+    fig_caption: true
+    code_folding: show
+    css: |
+      body { font-family: 'Georgia', serif; font-size: 15px; line-height: 1.7; color: #1a1a2e; }
+      h1, h2, h3 { font-family: 'Trebuchet MS', sans-serif; color: #16213e; }
+      h1.title { font-size: 2.2em; color: #0f3460; border-bottom: 3px solid #e94560; padding-bottom: 12px; }
+      .subtitle { color: #457b9d; font-style: italic; font-size: 1.1em; }
+      .highlight-box {
+        background: #eaf4fb;
+        border-left: 5px solid #0f3460;
+        padding: 14px 18px;
+        margin: 18px 0;
+        border-radius: 4px;
+      }
+      .warning-box {
+        background: #fff8e1;
+        border-left: 5px solid #f59e0b;
+        padding: 14px 18px;
+        margin: 18px 0;
+        border-radius: 4px;
+      }
+      blockquote {
+        border-left: 4px solid #e94560;
+        color: #555;
+        font-style: italic;
+        padding-left: 14px;
+      }
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = TRUE,
+  message    = FALSE,
+  warning    = FALSE,
+  fig.align  = "center",
+  dpi        = 150
+)
+
+pkgs <- c("tidyverse", "mFilter", "dynlm", "sandwich", "lmtest",
+          "ggplot2", "plotly", "knitr", "kableExtra", "scales")
+
+invisible(lapply(pkgs, function(p) {
+  if (!requireNamespace(p, quietly = TRUE)) install.packages(p, quiet = TRUE)
+  library(p, character.only = TRUE)
+}))
+
+# ── Plotly layout defaults ─────────────────────────────────────────────────────
+plt_layout <- list(
+  plot_bgcolor  = "white",
+  paper_bgcolor = "white",
+  font          = list(family = "Georgia, serif", size = 12),
+  margin        = list(l = 60, r = 30, t = 70, b = 50),
+  legend        = list(orientation = "h", y = -0.18, font = list(size = 11)),
+  hoverlabel    = list(bgcolor = "white", font = list(size = 12))
+)
+
+plt_cfg <- list(displayModeBar = TRUE, displaylogo = FALSE,
+                modeBarButtonsToRemove = list("lasso2d", "select2d"))
+
+clr_main  <- "#0f3460"
+clr_red   <- "#e94560"
+clr_blue  <- "#1a7abf"
+clr_teal  <- "#2ab7ca"
+clr_grey  <- "#888888"
+
+# plotly horizontal line helper (add_hline is a ggplot2 function, not plotly)
+hline <- function(y, color = "#888888", dash = "dot", width = 1) {
+  list(type = "line",
+       x0 = 0, x1 = 1, xref = "paper",
+       y0 = y, y1 = y,
+       line = list(color = color, dash = dash, width = width))
+}
+```
+
+---
+
+::::: {.warning-box}
+**Methodological positioning — read before proceeding.**
+
+This document does **not** replicate the operational model used by the Central Bank of Brazil in 1999. It develops a **modern, monthly, semi-structural adaptation** inspired by the four-block architecture of Bogdanski, Tombini & Werlang (2000): aggregate demand (IS), inflation dynamics (Phillips), exchange-rate transmission (UIP), and policy rules (Taylor).
+
+Key differences from the original MPP:
+
+- **Frequency**: the original model operated quarterly; this adaptation runs on **monthly data** (IBC-Br as activity proxy, Focus survey expectations, EMBI+ country risk).
+- **Estimation**: the original combined calibration and judgmental adjustment; this note uses **OLS with HAC standard errors** without formally imposing all structural restrictions.
+- **Neutral rate**: the original imposed $r^* = g^*$ as a hard constraint; this adaptation estimates a **statistical trend of the ex-ante real rate** as a proxy — it should not be interpreted as a structural neutral rate.
+- **Scope**: the original focused on conditional inflation forecasts under alternative SELIC paths; this adaptation also benchmarks the structural model against machine learning methods.
+
+Use this note as a **pedagogical reference** for the monetary policy transmission mechanism in Brazil, not as a replication of the BCB's internal toolkit.
+:::::
+
+---
+
+# Motivation: Why Small-Scale Models?
+
+The inflation-targeting regime requires the central bank to adopt a **forward-looking** stance: monetary policy decisions affect inflation with considerable lags. As Greenspan put it:
+
+> *"Implicit in any monetary policy action or inaction is an expectation of how the future will unfold, that is, a **forecast**."*
+
+The MPP occupies a strategic position in the model hierarchy: small enough to explain to a policy committee, structured enough to simulate alternative monetary policy scenarios.
+
+```{r model-hierarchy, echo=FALSE}
+df_hier <- data.frame(
+  model    = c("Leading\nIndicators", "VAR / ARMA", "MPP\n(Semi-struct.)", "Full DSGE"),
+  x        = 1:4,
+  transpar = c(90, 70, 55, 20),
+  forecast = c(30, 60, 70, 85),
+  tooltip  = c(
+    "Leading Indicators\nTransparency: High\nSimulation capacity: Low",
+    "VAR / ARMA\nTransparency: Medium\nSimulation capacity: Medium",
+    "MPP (Semi-structural)\nTransparency: Medium\nSimulation capacity: High",
+    "Full DSGE\nTransparency: Low\nSimulation capacity: Very High"
+  )
+)
+
+plot_ly(df_hier,
+        x    = ~transpar, y = ~forecast,
+        type = "scatter", mode = "markers+text",
+        marker = list(size = 22, opacity = 0.85,
+                      color = c(clr_red, clr_main, clr_blue, clr_teal)),
+        text      = ~model,
+        textposition = "top center",
+        hovertext = ~tooltip,
+        hoverinfo = "text",
+        showlegend = FALSE) %>%
+  layout(
+    title = list(
+      text = "<b>Macroeconomic Model Hierarchy</b><br><sub>Transparency vs. richness of mechanisms trade-off</sub>",
+      font = list(size = 14, color = clr_main)
+    ),
+    xaxis = list(title = "← Complexity / Micro-foundations",
+                 autorange = "reversed",
+                 showticklabels = FALSE, zeroline = FALSE),
+    yaxis = list(title = "Policy simulation capacity →",
+                 showticklabels = FALSE, zeroline = FALSE),
+    plot_bgcolor  = "white",
+    paper_bgcolor = "white",
+    font = plt_layout$font,
+    margin = plt_layout$margin,
+    hoverlabel = plt_layout$hoverlabel
+  ) %>%
+  config(displayModeBar = FALSE)
+```
+
+---
+
+# Model Structure
+
+The MPP consists of **four main blocks**. The diagram below shows their articulation (static — hover on subsequent charts for detail):
+
+```{r block-diagram, echo=FALSE, fig.height=3.8, fig.width=8}
+library(ggplot2)   # static diagram — plotly adds no value here
+
+nodes <- data.frame(
+  label = c("IS Curve\n(Aggregate Demand)",
+            "Phillips Curve\n(Aggregate Supply)",
+            "Uncovered\nInterest Parity",
+            "Monetary\nPolicy Rule",
+            "INFLATION"),
+  x = c(1, 3, 3, 1, 2),
+  y = c(2, 2, 0, 0, 1),
+  fill = c(clr_main, clr_main, clr_main, clr_red, clr_teal)
+)
+edges <- data.frame(
+  x0 = c(1,1,3,3,1), y0 = c(2,0,0,2,2),
+  x1 = c(2,2,2,2,3), y1 = c(1,1,1,1,2)
+)
+ggplot() +
+  geom_segment(data = edges, aes(x=x0,y=y0,xend=x1,yend=y1),
+               arrow = arrow(length=unit(0.2,"cm"), type="closed"),
+               color = "#457b9d", linewidth = 0.8) +
+  geom_label(data = nodes, aes(x=x, y=y, label=label),
+             fill = nodes$fill, color = "white", size = 3.2, fontface = "bold",
+             label.padding = unit(0.4,"lines"), label.r = unit(0.15,"lines")) +
+  xlim(0.3,3.7) + ylim(-0.4,2.6) +
+  theme_void() +
+  labs(title = "MPP Block Diagram",
+       caption = "Source: Bogdanski, Tombini & Werlang (2000), Figure 1") +
+  theme(plot.title   = element_text(face="bold", color=clr_main, size=13),
+        plot.caption = element_text(color="#888", size=9))
+```
+
+---
+
+# Block I — IS Curve (Aggregate Demand)
+
+## Theoretical Specification
+
+$$\boxed{\tilde{y}_t = \beta_0 + \beta_1 \tilde{y}_{t-1} + \beta_2 \tilde{y}_{t-2} + \beta_3 r_{t-1} + \varepsilon^d_t}$$
+
+where $\tilde{y}_t = \ln(Y_t / Y^*_t)$ is the output gap and $r_t$ is the ex-ante real interest rate.
+
+::::: {.warning-box}
+**Neutral rate note.** The original MPP imposed $r^* = g^*$ as a hard structural restriction. This adaptation estimates a *statistical trend of the ex-ante real rate* as a proxy. That average reflects BCB reactions to shocks and crises — it is not automatically the equilibrium rate consistent with potential growth.
+:::::
+
+## Output Gap and HP Filter
+
+```{r hp-gap}
+set.seed(42)
+n     <- 120
+trend <- cumsum(c(0.005, rep(0.006, n-1) + rnorm(n-1, 0, 0.001)))
+cycle_v <- numeric(n)
+for(t in 2:n) cycle_v[t] <- 0.65 * cycle_v[t-1] + rnorm(1, 0, 0.01)
+
+idx_gdp <- 100 + trend + cycle_v
+dates   <- seq(as.Date("1995-01-01"), by = "quarter", length.out = n)
+
+df_gdp <- data.frame(date = dates, idx_gdp = idx_gdp)
+hp_result        <- mFilter::hpfilter(df_gdp$idx_gdp, freq = 1600)
+df_gdp$potential <- hp_result$trend
+df_gdp$gap       <- hp_result$cycle
+
+# ── Chart 1: observed vs potential ─────────────────────────────────────────────
+p_gdp <- plot_ly(df_gdp, x = ~date) %>%
+  add_lines(y = ~idx_gdp,
+            name = "Observed GDP",
+            line = list(color = clr_main, width = 2),
+            hovertemplate = "%{x|%Y-%m}<br>Observed: %{y:.2f}<extra></extra>") %>%
+  add_lines(y = ~potential,
+            name = "Potential GDP (HP)",
+            line = list(color = clr_red, width = 2, dash = "dash"),
+            hovertemplate = "%{x|%Y-%m}<br>Potential: %{y:.2f}<extra></extra>") %>%
+  layout(
+    title  = list(text = "<b>Observed GDP vs. Potential Output</b><br><sub>Hodrick-Prescott filter (λ = 1,600) — simulated data</sub>",
+                  font = list(size = 13, color = clr_main)),
+    xaxis  = list(title = ""),
+    yaxis  = list(title = "Index (simulated)"),
+    hovermode    = "x unified",
+    plot_bgcolor = "white", paper_bgcolor = "white",
+    legend = plt_layout$legend, font = plt_layout$font,
+    margin = plt_layout$margin, hoverlabel = plt_layout$hoverlabel
+  )
+
+# ── Chart 2: output gap ─────────────────────────────────────────────────────────
+p_gap <- plot_ly(df_gdp, x = ~date) %>%
+  add_ribbons(ymin = ~pmin(gap, 0), ymax = ~pmax(gap, 0),
+              fillcolor = paste0(clr_main, "30"),
+              line = list(color = "transparent"),
+              name = "Gap area", showlegend = FALSE,
+              hoverinfo = "skip") %>%
+  add_lines(y = ~gap,
+            name = "Output gap",
+            line = list(color = clr_main, width = 2),
+            hovertemplate = "%{x|%Y-%m}<br>Gap: %{y:.4f}<extra></extra>") %>%
+  layout(shapes = list(hline(0, clr_grey, "dot"))) %>%
+  layout(
+    title  = list(text = "<b>Output Gap</b><br><sub>Deviation from HP trend (index units)</sub>",
+                  font = list(size = 13, color = clr_main)),
+    xaxis  = list(title = ""),
+    yaxis  = list(title = "Gap (index units)"),
+    hovermode    = "x unified",
+    plot_bgcolor = "white", paper_bgcolor = "white",
+    legend = plt_layout$legend, font = plt_layout$font,
+    margin = plt_layout$margin, hoverlabel = plt_layout$hoverlabel
+  )
+
+subplot(p_gdp, p_gap, nrows = 2, shareX = TRUE, titleY = TRUE) %>%
+  layout(hovermode = "x unified") %>%
+  config(plt_cfg)
+```
+
+## IS Estimation
+
+```{r is-estimation}
+set.seed(7)
+nominal_rate  <- 0.18 + 0.3 * (-df_gdp$gap) + rnorm(n, 0, 0.03)
+inflation_sim <- 0.06 + 0.5 * df_gdp$gap    + rnorm(n, 0, 0.015)
+real_rate     <- nominal_rate - inflation_sim
+
+df_is <- df_gdp %>%
+  mutate(y = gap, y_l1 = lag(gap,1), y_l2 = lag(gap,2), r_l1 = lag(real_rate,1)) %>%
+  drop_na()
+
+model_is    <- lm(y ~ y_l1 + y_l2 + r_l1, data = df_is)
+errors_hac  <- sandwich::NeweyWest(model_is, lag = 4, prewhite = FALSE)
+coeftest_is <- lmtest::coeftest(model_is, vcov = errors_hac)
+
+knitr::kable(
+  broom::tidy(coeftest_is) %>%
+    mutate(term = c("β₀ (intercept)","β₁ (ỹ_{t-1})","β₂ (ỹ_{t-2})","β₃ (r_{t-1})"),
+           across(where(is.numeric), ~round(.x,4))) %>%
+    rename(Parameter=term, Estimate=estimate,
+           `Std. Error`=std.error, `t-stat`=statistic, `p-value`=p.value),
+  caption = "**IS Curve — OLS with HAC errors (Newey-West, 4 lags)**"
+) %>%
+  kableExtra::kable_styling(bootstrap_options=c("striped","hover","condensed"), full_width=FALSE)
+```
+
+```{r is-diagnostics}
+df_is$fitted <- fitted(model_is)
+df_is$resid  <- residuals(model_is)
+
+p_fit <- plot_ly(df_is, x = ~date) %>%
+  add_lines(y = ~y*100, name = "Observed",
+            line = list(color = clr_main, width = 1.8),
+            hovertemplate = "%{x|%Y-%m}<br>Obs: %{y:.3f}<extra></extra>") %>%
+  add_lines(y = ~fitted*100, name = "Fitted",
+            line = list(color = clr_red, width = 1.8, dash = "dash"),
+            hovertemplate = "%{x|%Y-%m}<br>Fitted: %{y:.3f}<extra></extra>") %>%
+  layout(title = list(text = "<b>Observed vs. fitted output gap</b>",
+                      font = list(size = 12, color = clr_main)),
+         xaxis = list(title = ""), yaxis = list(title = "Gap × 100"),
+         hovermode = "x unified", plot_bgcolor="white", paper_bgcolor="white",
+         legend = plt_layout$legend, font = plt_layout$font,
+         margin = plt_layout$margin, hoverlabel = plt_layout$hoverlabel)
+
+p_res <- plot_ly(df_is, x = ~date) %>%
+  add_bars(y = ~resid*100, name = "Residual",
+           marker = list(color = paste0(clr_blue, "99")),
+           hovertemplate = "%{x|%Y-%m}<br>Residual: %{y:.4f}<extra></extra>") %>%
+  layout(shapes = list(hline(0, clr_grey, "dot"))) %>%
+  layout(title = list(text = "<b>IS Curve residuals</b>",
+                      font = list(size = 12, color = clr_main)),
+         xaxis = list(title = ""), yaxis = list(title = "Residual"),
+         hovermode = "x unified", plot_bgcolor="white", paper_bgcolor="white",
+         legend = plt_layout$legend, font = plt_layout$font,
+         margin = plt_layout$margin, hoverlabel = plt_layout$hoverlabel)
+
+subplot(p_fit, p_res, nrows = 2, shareX = TRUE, titleY = TRUE) %>%
+  layout(hovermode = "x unified") %>%
+  config(plt_cfg)
+```
+
+---
+
+# Block II — Phillips Curve (Aggregate Supply)
+
+## Hybrid Specification
+
+$$\boxed{\pi_t = \underbrace{\alpha_1 \pi_{t-1} + \alpha_2 \pi_{t-2}}_{\text{inertia}} + \underbrace{\alpha_{fwd}\,\mathbb{E}_t[\pi_{t+1}]}_{\text{expectations}} + \alpha_3 \tilde{y}_{t-1} + \alpha_4 \Delta \ln E_t + \varepsilon_t}$$
+
+Long-run restriction: $\alpha_1 + \alpha_2 + \alpha_{fwd} = 1$.
+
+::::: {.warning-box}
+**OLS caveat.** This adaptation does not formally impose the long-run restriction. Additionally, 12-month accumulated CPI creates mechanical autocorrelation across observations; and Focus expectations should be verified as genuinely ex-ante to avoid look-ahead bias.
+:::::
+
+## Simulation and Pass-Through
+
+```{r phillips-simulation}
+set.seed(21)
+# α₁ + α₂ + α_fwd = 0.45 + 0.20 + 0.35 = 1.00 ✓ (long-run neutrality)
+# α₃ (output gap) and α₄ (FX) are separate — not part of the inflation restriction
+alpha1 <- 0.45; alpha2 <- 0.20; alpha_fwd <- 0.35
+alpha3 <- 0.25; alpha4 <- 0.12
+pi_star <- 0.045
+
+delta_e <- rnorm(n, 0, 0.04)
+eps_pc  <- rnorm(n, 0, 0.008)
+pi <- numeric(n); pi[1:3] <- 0.06
+for (t in 4:n) {
+  pi_fwd <- pi[t-1] + rnorm(1, 0, 0.005)
+  pi[t]  <- alpha1*pi[t-1] + alpha2*pi[t-2] + alpha_fwd*pi_fwd +
+            alpha3*df_gdp$gap[t] + alpha4*delta_e[t] + eps_pc[t]
+  pi[t]  <- max(pi[t], -0.02)
+}
+
+df_pc <- data.frame(date = dates, inflation = pi, gap = df_gdp$gap, delta_e = delta_e)
+
+# ── Panel 1: simulated inflation ────────────────────────────────────────────────
+p_pi <- plot_ly(df_pc, x = ~date) %>%
+  add_lines(y = ~inflation*100, name = "Inflation",
+            line = list(color = clr_red, width = 2),
+            hovertemplate = "%{x|%Y-%m}<br>Inflation: %{y:.2f}%<extra></extra>") %>%
+  layout(shapes = list(hline(pi_star*100, clr_main, "dash", 1.5))) %>%
+  layout(
+    title = list(text = "<b>Simulated inflation — Hybrid Phillips Curve</b><br><sub>α₁ + α₂ + α_fwd = 1.00 (long-run neutrality)</sub>",
+                 font = list(size = 12, color = clr_main)),
+    xaxis = list(title = ""), yaxis = list(title = "CPI (% y/y)", ticksuffix = "%"),
+    hovermode = "x unified", plot_bgcolor="white", paper_bgcolor="white",
+    legend = plt_layout$legend, font = plt_layout$font,
+    margin = plt_layout$margin, hoverlabel = plt_layout$hoverlabel
+  )
+
+# ── Panel 2: pass-through specifications ───────────────────────────────────────
+E_seq  <- seq(1.5, 6.5, length.out = 100)
+df_pt  <- data.frame(
+  E         = E_seq,
+  Constant  = 0.12,
+  Quadratic = 0.08 + 0.04 * (log(E_seq))^2,
+  Level     = pmax(0.05, 0.22 - 0.03 * log(E_seq))
+)
+
+p_pt <- plot_ly(df_pt, x = ~E) %>%
+  add_lines(y = ~Constant,  name = "Constant",
+            line = list(color = clr_main, width = 2),
+            hovertemplate = "BRL/USD: %{x:.2f}<br>α₄ (const): %{y:.3f}<extra></extra>") %>%
+  add_lines(y = ~Quadratic, name = "Quadratic in Δe",
+            line = list(color = clr_red, width = 2),
+            hovertemplate = "BRL/USD: %{x:.2f}<br>α₄ (quad): %{y:.3f}<extra></extra>") %>%
+  add_lines(y = ~Level,     name = "Level-dependent",
+            line = list(color = clr_teal, width = 2),
+            hovertemplate = "BRL/USD: %{x:.2f}<br>α₄ (level): %{y:.3f}<extra></extra>") %>%
+  layout(
+    title = list(text = "<b>Exchange rate pass-through: alternative specifications</b><br><sub>Goldfajn & Werlang (1999)</sub>",
+                 font = list(size = 12, color = clr_main)),
+    xaxis = list(title = "Exchange Rate (BRL/USD)"),
+    yaxis = list(title = "Coefficient α₄"),
+    hovermode = "x", plot_bgcolor="white", paper_bgcolor="white",
+    legend = plt_layout$legend, font = plt_layout$font,
+    margin = plt_layout$margin, hoverlabel = plt_layout$hoverlabel
+  )
+
+subplot(p_pi, p_pt, nrows = 2, shareX = FALSE, titleY = TRUE) %>%
+  config(plt_cfg)
+```
+
+---
+
+# Block III — Uncovered Interest Parity (UIP)
+
+## Corrected Sign Convention
+
+With $e_t = \ln(\text{BRL/USD})$, the UIP in first differences is:
+
+$$\boxed{\Delta e_t = -\alpha_i \Delta i_t + \alpha_f \Delta i^*_t + \alpha_x \Delta x_t + \eta_t}$$
+
+with $\alpha_i > 0,\ \alpha_f > 0,\ \alpha_x > 0$.
+
+::::: {.warning-box}
+**Sign error to avoid.** The domestic SELIC rate must enter with a **negative** coefficient. Under $e_t = \ln(\text{BRL/USD})$, a COPOM hike appreciates the BRL (reduces $e_t$). Writing it with a positive sign inverts the entire exchange-rate transmission channel.
+:::::
+
+```{r uip-simulation}
+set.seed(99)
+i_ext <- 0.055
+x_risk <- numeric(n); e_log <- numeric(n)
+x_risk[1] <- 300; e_log[1] <- log(3.5)
+
+for(t in 2:n) {
+  x_risk[t] <- max(0.7*x_risk[t-1] + rnorm(1,0,25) - 15*(t>60), 50)
+  selic_t   <- 0.12 - 0.02*(t/n) + rnorm(1,0,0.015)
+  # UIP: higher domestic rate → BRL appreciation → negative sign
+  e_log[t]  <- e_log[t-1] - (selic_t - i_ext - x_risk[t]/10000)/4 + rnorm(1,0,0.025)
+}
+
+df_uip <- data.frame(date = dates, fx = exp(e_log), risk = x_risk)
+
+p_e <- plot_ly(df_uip, x = ~date) %>%
+  add_lines(y = ~fx, name = "BRL/USD",
+            line = list(color = clr_main, width = 2),
+            hovertemplate = "%{x|%Y-%m}<br>BRL/USD: %{y:.3f}<extra></extra>") %>%
+  layout(
+    title = list(text = "<b>Simulated exchange rate (BRL/USD)</b><br><sub>Higher domestic rate → BRL appreciation (correct UIP sign)</sub>",
+                 font = list(size = 12, color = clr_main)),
+    xaxis = list(title = ""), yaxis = list(title = "BRL/USD"),
+    hovermode = "x unified", plot_bgcolor="white", paper_bgcolor="white",
+    legend = plt_layout$legend, font = plt_layout$font,
+    margin = plt_layout$margin, hoverlabel = plt_layout$hoverlabel
+  )
+
+p_x <- plot_ly(df_uip, x = ~date) %>%
+  add_lines(y = ~risk, name = "EMBI+",
+            line = list(color = clr_red, width = 2),
+            hovertemplate = "%{x|%Y-%m}<br>EMBI+: %{y:.0f} bps<extra></extra>") %>%
+  layout(shapes = list(hline(200, clr_grey, "dot"))) %>%
+  layout(
+    title = list(text = "<b>Country risk premium (EMBI+)</b><br><sub>AR(1) with gradual fiscal improvement</sub>",
+                 font = list(size = 12, color = clr_main)),
+    xaxis = list(title = ""), yaxis = list(title = "Basis Points (bps)"),
+    hovermode = "x unified", plot_bgcolor="white", paper_bgcolor="white",
+    legend = plt_layout$legend, font = plt_layout$font,
+    margin = plt_layout$margin, hoverlabel = plt_layout$hoverlabel
+  )
+
+subplot(p_e, p_x, nrows = 2, shareX = TRUE, titleY = TRUE) %>%
+  layout(hovermode = "x unified") %>%
+  config(plt_cfg)
+```
+
+---
+
+# Block IV — Monetary Policy Rule
+
+## Smoothed Taylor Rule
+
+$$\boxed{i_t = (1-\lambda)\,i_{t-1} + \lambda \left[\alpha_1(\pi_t - \pi^*) + \alpha_2 \tilde{y}_t + \alpha_3\right]}$$
+
+::::: {.warning-box}
+**Normative vs. positive.** The original MPP used the rule normatively — to find the SELIC path consistent with target convergence under scenario X. Using it as a positive predictor of COPOM decisions is a different exercise. Label rule-implied paths as *"policy-consistent path under the estimated reaction function"*, not as SELIC forecasts.
+:::::
+
+```{r taylor-rules}
+set.seed(55)
+N_rules <- 80
+alpha_pi_r <- 1.5; alpha_y_r <- 0.5; lambda_sm <- 0.7
+
+i_taylor <- alpha_pi_r*(pi[1:N_rules]-pi_star) + alpha_y_r*df_gdp$gap[1:N_rules] + 0.10
+i_smooth <- numeric(N_rules); i_smooth[1] <- i_taylor[1]
+for (t in 2:N_rules) i_smooth[t] <- (1-lambda_sm)*i_smooth[t-1] + lambda_sm*i_taylor[t]
+i_const <- rep(mean(i_taylor), N_rules)
+
+df_rules <- data.frame(date = dates[1:N_rules],
+                       Pure.Taylor = pmax(i_taylor, 0.03),
+                       Smoothed    = pmax(i_smooth, 0.03),
+                       Constant    = i_const)
+
+plot_ly(df_rules, x = ~date) %>%
+  add_lines(y = ~Pure.Taylor*100, name = "Pure Taylor",
+            line = list(color = clr_main, width = 2),
+            hovertemplate = "%{x|%Y-%m}<br>Pure Taylor: %{y:.1f}%<extra></extra>") %>%
+  add_lines(y = ~Smoothed*100, name = "Smoothed Taylor (λ=0.7)",
+            line = list(color = clr_red, width = 2),
+            hovertemplate = "%{x|%Y-%m}<br>Smoothed: %{y:.1f}%<extra></extra>") %>%
+  add_lines(y = ~Constant*100, name = "Constant Rate",
+            line = list(color = clr_grey, width = 2, dash = "dash"),
+            hovertemplate = "%{x|%Y-%m}<br>Constant: %{y:.1f}%<extra></extra>") %>%
+  layout(
+    title = list(
+      text = "<b>Policy rate path under alternative rules</b><br><sub>Illustrative simulation — α_π = 1.5, α_y = 0.5</sub>",
+      font = list(size = 13, color = clr_main)
+    ),
+    xaxis = list(title = ""),
+    yaxis = list(title = "Policy Rate (% p.a.)", ticksuffix = "%"),
+    hovermode = "x unified",
+    plot_bgcolor = "white", paper_bgcolor = "white",
+    legend = plt_layout$legend, font = plt_layout$font,
+    margin = plt_layout$margin, hoverlabel = plt_layout$hoverlabel
+  ) %>%
+  config(plt_cfg)
+```
+
+---
+
+# Full System Simulation
+
+## Inflation Fan Chart
+
+```{r fan-chart, fig.height=5}
+set.seed(1234)
+T_proj <- 12; N_sims <- 2000
+a1_pc <- 0.45; a2_pc <- 0.20; a_fwd_pc <- 0.35   # sum = 1.00 ✓
+a3_pc <- 0.25; a4_pc <- 0.12
+b1_is <- 0.70; b2_is <- -0.15; b3_is <- -0.25
+lambda_r <- 0.65; phi_pi <- 1.5; phi_y <- 0.5
+pi0 <- 0.055; pi_1 <- 0.060; y0 <- -0.01; i0 <- 0.115; e0 <- log(5.0)
+
+simulate_mpp <- function(seed_s) {
+  set.seed(seed_s)
+  pi_v <- c(pi_1, pi0, numeric(T_proj))
+  y_v  <- c(0, y0, numeric(T_proj))
+  i_v  <- c(i0, i0, numeric(T_proj))
+  for (t in 3:(T_proj+2)) {
+    r_real   <- i_v[t-1] - pi_v[t-1]
+    y_v[t]   <- b1_is*y_v[t-1] + b2_is*y_v[t-2] + b3_is*r_real + rnorm(1,0,0.007)
+    pi_fwd_t <- pi_v[t-1] + rnorm(1,0,0.004)
+    delta_e_t <- -(i_v[t-1]-0.055-0.03)/4 + rnorm(1,0,0.015)
+    pi_v[t]  <- a1_pc*pi_v[t-1] + a2_pc*pi_v[t-2] +
+                a_fwd_pc*pi_fwd_t + a3_pc*y_v[t-1] +
+                a4_pc*delta_e_t + rnorm(1,0,0.006)
+    pi_v[t]  <- max(pi_v[t], 0)
+    i_v[t]   <- (1-lambda_r)*i_v[t-1] +
+                lambda_r*(phi_pi*(pi_v[t]-pi_star)+phi_y*y_v[t]+0.10)
+  }
+  pi_v[3:(T_proj+2)]
+}
+
+mat_pi <- sapply(1:N_sims, simulate_mpp)
+qtis   <- as.data.frame(t(apply(mat_pi, 1, quantile,
+                                probs = c(.10,.20,.30,.40,.50,.60,.70,.80,.90))))
+colnames(qtis) <- paste0("q", c(10,20,30,40,50,60,70,80,90))
+qtis$quarter   <- seq(as.Date("2024-04-01"), by="quarter", length.out=T_proj)
+
+# ── Full plotly fan chart with interactive bands ────────────────────────────────
+plot_ly(qtis, x = ~quarter) %>%
+
+  # 80% band (p10–p90)
+  add_ribbons(ymin = ~q10*100, ymax = ~q90*100,
+              fillcolor = paste0(clr_main, "1A"),
+              line = list(color = "transparent"),
+              name = "80% band", legendgroup = "bands",
+              hoverinfo = "skip") %>%
+
+  # 60% band (p20–p80)
+  add_ribbons(ymin = ~q20*100, ymax = ~q80*100,
+              fillcolor = paste0(clr_main, "2A"),
+              line = list(color = "transparent"),
+              name = "60% band", legendgroup = "bands",
+              hoverinfo = "skip") %>%
+
+  # 40% band (p30–p70)
+  add_ribbons(ymin = ~q30*100, ymax = ~q70*100,
+              fillcolor = paste0(clr_main, "3A"),
+              line = list(color = "transparent"),
+              name = "40% band", legendgroup = "bands",
+              hoverinfo = "skip") %>%
+
+  # 20% band (p40–p60)
+  add_ribbons(ymin = ~q40*100, ymax = ~q60*100,
+              fillcolor = paste0(clr_main, "45"),
+              line = list(color = "transparent"),
+              name = "20% band", legendgroup = "bands",
+              hoverinfo = "skip") %>%
+
+  # Median line with rich tooltip
+  add_lines(y = ~q50*100,
+            name = "Median (p50)",
+            line = list(color = clr_main, width = 3),
+            hovertemplate = paste0(
+              "<b>%{x|%Y-Q%q}</b><br>",
+              "Median: %{y:.2f}%<br>",
+              "<i>Hover bands for range</i><extra></extra>"
+            )) %>%
+
+  # p10 / p90 boundary lines (subtle)
+  add_lines(y = ~q10*100, name = "p10",
+            line = list(color = clr_main, width = 0.7, dash = "dot"),
+            showlegend = FALSE,
+            hovertemplate = "p10: %{y:.2f}%<extra></extra>") %>%
+  add_lines(y = ~q90*100, name = "p90",
+            line = list(color = clr_main, width = 0.7, dash = "dot"),
+            showlegend = FALSE,
+            hovertemplate = "p90: %{y:.2f}%<extra></extra>") %>%
+
+  # Inflation target
+  add_lines(y = rep(pi_star*100, T_proj),
+            x = ~quarter,
+            name = paste0("Target (", pi_star*100, "%)"),
+            line = list(color = clr_red, width = 1.8, dash = "dash"),
+            hovertemplate = "Target: %{y:.1f}%<extra></extra>") %>%
+
+  layout(
+    title = list(
+      text = paste0("<b>Fan Chart — CPI Inflation Projection</b><br>",
+                    "<sub>Monte Carlo (N=", N_sims, " paths) — 20/40/60/80% conditional forecast bands</sub>"),
+      font = list(size = 14, color = clr_main)
+    ),
+    xaxis = list(title = "", tickformat = "%Y"),
+    yaxis = list(title = "CPI (% p.a.)", ticksuffix = "%"),
+    hovermode = "x unified",
+    plot_bgcolor = "white", paper_bgcolor = "white",
+    legend = list(orientation = "h", y = -0.18, font = list(size = 11)),
+    font = plt_layout$font,
+    margin = list(l=60, r=30, t=80, b=60),
+    hoverlabel = plt_layout$hoverlabel
+  ) %>%
+  config(plt_cfg)
+```
+
+---
+
+# Impulse Response: +200 bps Policy Shock
+
+```{r irf-shock}
+simulate_shock <- function(delta_selic = 0.02, seed_s = 42) {
+  set.seed(seed_s)
+  T_sim <- 16
+  pi_v  <- c(0.060, 0.055, numeric(T_sim))
+  y_v   <- c(0.005, -0.01, numeric(T_sim))
+  i_v   <- c(0.115, 0.115 + delta_selic, numeric(T_sim))
+  for (t in 3:(T_sim+2)) {
+    r_real  <- i_v[t-1] - pi_v[t-1]
+    y_v[t]  <- b1_is*y_v[t-1] + b2_is*y_v[t-2] + b3_is*r_real + rnorm(1,0,0.004)
+    pi_fwd  <- pi_v[t-1] + rnorm(1,0,0.003)
+    pi_v[t] <- a1_pc*pi_v[t-1] + a2_pc*pi_v[t-2] +
+               a_fwd_pc*pi_fwd + a3_pc*y_v[t-1] + rnorm(1,0,0.004)
+    pi_v[t] <- max(pi_v[t], 0)
+    i_v[t]  <- i_v[2]
+  }
+  data.frame(t = 1:T_sim,
+             inflation = pi_v[3:(T_sim+2)] * 100,
+             gap       = y_v[3:(T_sim+2)] * 100,
+             selic     = i_v[3:(T_sim+2)] * 100,
+             scenario  = ifelse(delta_selic > 0, "+200bps shock", "Baseline"))
+}
+
+df_irf <- bind_rows(simulate_shock(0.00), simulate_shock(0.02))
+
+make_irf_line <- function(y_var, label_var, y_title, add_target = FALSE) {
+  df_base  <- df_irf %>% filter(scenario == "Baseline")
+  df_shock <- df_irf %>% filter(scenario == "+200bps shock")
+  p <- plot_ly() %>%
+    add_lines(data = df_base,
+              x = ~t, y = ~get(y_var),
+              name = "Baseline",
+              line = list(color = clr_grey, width = 2, dash = "dot"),
+              hovertemplate = paste0("Q%{x}<br>Baseline ", label_var, ": %{y:.2f}%<extra></extra>")) %>%
+    add_lines(data = df_shock,
+              x = ~t, y = ~get(y_var),
+              name = "+200bps",
+              line = list(color = clr_red, width = 2.5),
+              hovertemplate = paste0("Q%{x}<br>+200bps ", label_var, ": %{y:.2f}%<extra></extra>"))
+  if (add_target)
+    p <- p %>% layout(shapes = list(hline(pi_star*100, clr_main, "dot", 1)))
+  p %>% layout(
+    title  = list(text = paste0("<b>", y_title, "</b>"),
+                  font = list(size = 12, color = clr_main)),
+    xaxis  = list(title = "Quarters", dtick = 2),
+    yaxis  = list(title = paste0(y_title, " (%)"), ticksuffix = "%"),
+    hovermode = "x unified",
+    plot_bgcolor = "white", paper_bgcolor = "white",
+    legend = plt_layout$legend, font = plt_layout$font, hoverlabel = plt_layout$hoverlabel
+  )
+}
+
+p_inf  <- make_irf_line("inflation", "Inflation", "Inflation",    add_target = TRUE)
+p_gap2 <- make_irf_line("gap",       "Gap",       "Output gap",   add_target = FALSE)
+p_sel  <- make_irf_line("selic",     "Selic",     "Policy rate",  add_target = FALSE)
+
+subplot(
+  subplot(p_inf, p_gap2, shareX = TRUE, titleY = TRUE),
+  p_sel,
+  nrows = 2, shareX = TRUE, titleY = TRUE
+) %>%
+  layout(
+    title = list(
+      text = "<b>Impulse Response — Contractionary Policy Shock (+200 bps)</b><br><sub>Disinflation via demand channel with ~2–3 quarter lag</sub>",
+      font = list(size = 13, color = clr_main)
+    ),
+    hovermode = "x unified",
+    plot_bgcolor = "white", paper_bgcolor = "white"
+  ) %>%
+  config(plt_cfg)
+```
+
+---
+
+# Limitations
+
+```{r limitations-table, echo=FALSE}
+df_lim <- data.frame(
+  Issue = c(
+    "Long-run restriction not imposed (Phillips)",
+    "Overlapping 12m inflation variable",
+    "UIP not fully identified",
+    "Neutral rate is a statistical trend",
+    "OLS with no simultaneity correction",
+    "Monthly frequency (vs. original quarterly)"
+  ),
+  Description = c(
+    "OLS does not enforce α₁+α₂+α_fwd=1; holds in simulation but not estimation",
+    "12m CPI creates mechanical autocorrelation; monthly or non-overlapping measures preferred",
+    "Estimated as VAR/OLS auxiliary; foreign rate proxied rather than measured",
+    "r* estimated from rolling ex-ante real rates — reflects policy reactions, not structural equilibrium",
+    "IS, Phillips, and UIP are simultaneously determined; OLS does not identify structural channels",
+    "IBC-Br is a reasonable proxy but introduces differences vs. quarterly GDP"
+  ),
+  Fix = c(
+    "Impose as linear constraint in nlm() or systemfit",
+    "Use monthly or trimestral non-overlapping inflation",
+    "Use a mapped foreign rate series; impose UIP sign restriction",
+    "Report r* scenarios: {4%, 5%, 6%}",
+    "Instrument with lagged values or use SVAR identification",
+    "Acknowledge frequency adaptation; verify lag structure in months"
+  )
+)
+knitr::kable(df_lim, col.names = c("Issue","Description","Recommended Fix"),
+             caption = "**Known limitations and recommended corrections**") %>%
+  kableExtra::kable_styling(bootstrap_options=c("striped","hover","condensed")) %>%
+  kableExtra::column_spec(1, bold=TRUE, color=clr_main) %>%
+  kableExtra::column_spec(3, italic=TRUE, color="#457b9d")
+```
+
+---
+
+# References
+
+- Bogdanski, J., Tombini, A.A. & Werlang, S.R.C. (2000). *Implementing Inflation Targeting in Brazil*. Working Paper 1, Banco Central do Brasil.
+- Goldfajn, I. & Werlang, S.R.C. (1999). *The Pass-through from Depreciation to Inflation*. Mimeo, PUC-Rio / BCB.
+- Taylor, J.B. (1993). Discretion versus Policy Rules in Practice. *Carnegie-Rochester Conference Series on Public Policy*, 39, 195–214.
+- Hodrick, R.J. & Prescott, E.C. (1997). Postwar U.S. Business Cycles. *Journal of Money, Credit and Banking*, 29(1), 1–16.
+- Castro, M.R. et al. (2011). *SAMBA: Stochastic Analytical Model with a Bayesian Approach*. Working Paper 239, BCB.
+
+---
+
+*All data are **simulated** for pedagogical purposes. This document is an adaptation — not a replication — of the BCB Small-Scale Model.*
